@@ -1,0 +1,55 @@
+From 917cf3135535029719e1471cadc4d160d1ed6198 Mon Sep 17 00:00:00 2001
+From: Christoph Berliner <32103696+Styx85@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 11:39:05 +0100
+Subject: [PATCH 4/4] vulkan: use the large 64x128 tile also for float matmuls
+ on GCN APUs
+
+Extend the GCN APU large tile to the f32/f16/bf16 matmul pipelines,
+with the usual BK of 16 ({128, 64, 128, 16, 32, 128, 2, 4, 2, 1, 64}),
+and enable the large tile for all types there. As for the quantized
+matmul it is only selected for n > 64.
+
+gfx90c, test-backend-ops perf MUL_MAT m=4096 n=512 k=14336: f32
+0.80 -> 1.03 TFLOPS, f16 1.24 -> 1.58, bf16 0.36 -> 0.95; quantized
+types unchanged. test-backend-ops MUL_MAT 2604/2604.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ ggml/src/ggml-vulkan/ggml-vulkan.cpp | 7 +++++--
+ 1 file changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/ggml/src/ggml-vulkan/ggml-vulkan.cpp b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+index 1482188..19fe26b 100644
+--- a/ggml/src/ggml-vulkan/ggml-vulkan.cpp
++++ b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+@@ -1954,7 +1954,7 @@ static bool ggml_vk_amd_large_tile_supported(const vk_device& device) {
+     return major > 2 || (major == 2 && build >= 416);
+ }
+ 
+-// Large tile for the dequantizing (non integer dot) matmul on GCN APUs with RADV, see ggml_vk_load_shaders.
++// Large matmul tile (dequantizing and float matmul, no integer dot) on GCN APUs with RADV, see ggml_vk_load_shaders.
+ static bool ggml_vk_gcn_apu_large_mmq_tile(const vk_device& device) {
+     return device->vendor_id == VK_VENDOR_ID_AMD && device->architecture == AMD_GCN && device->uma &&
+            device->driver_id != vk::DriverId::eAmdProprietary && device->subgroup_size == 64 && !device->coopmat_support;
+@@ -2154,6 +2154,9 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
+             // matmul; it is selected for n > 64, smaller batches keep the GCN medium tile above.
+             l_warptile_mmq  = { 128, 64, 128, 32, 32, 128, 2, 4, 2, 1, 64 };
+             l_mmq_wg_denoms = { 64, 128, 1 };
++            // same shape for the float matmuls (f32/f16/bf16 weights), with the usual BK of 16
++            l_warptile      = { 128, 64, 128, 16, 32, 128, 2, 4, 2, 1, 64 };
++            l_wg_denoms     = { 64, 128, 1 };
+         }
+ 
+         if (device->vendor_id == VK_VENDOR_ID_INTEL && device->coopmat_support) {
+@@ -5318,7 +5321,7 @@ vk_device ggml_vk_get_device(size_t idx) {
+ #ifndef GGML_VULKAN_RUN_TESTS
+             case VK_VENDOR_ID_AMD:
+                 device->mul_mat_l[i]    = (device->coopmat_support && ggml_vk_amd_large_tile_supported(device)) ||
+-                                          (ggml_vk_gcn_apu_large_mmq_tile(device) && ggml_is_quantized((ggml_type) i));
++                                          ggml_vk_gcn_apu_large_mmq_tile(device);
+                 device->mul_mat_m[i]    = true;
+                 device->mul_mat_s[i]    = true;
+                 device->mul_mat_id_l[i] = false;
+-- 
+2.56.1
+
